@@ -1,0 +1,172 @@
+name: 'container-build-push'
+description: 'Builds a container image and pushes it to a registry with provenance and SBOM attestations.'
+
+# Caller must run actions/checkout first.
+# Caller must have:
+#   id-token: write           # actions/attest mints an OIDC token for Sigstore
+#   attestations: write       # actions/attest API
+#   artifact-metadata: write  # actions/attest API
+#   packages: write           # only when pushing to GHCR with GITHUB_TOKEN
+
+inputs:
+  registry:
+    description: 'Container registry (e.g. docker.io, ghcr.io).'
+    required: false
+    default: 'docker.io'
+  username:
+    description: 'Registry username. This is usually github.actor for GHCR.'
+    required: true
+  password:
+    description: 'Registry password or token. Pass via secrets.'
+    required: true
+  image-name:
+    description: 'Image name without registry prefix (e.g. owner/repo).'
+    required: true
+  context:
+    description: 'Build context path passed to docker/build-push-action.'
+    required: false
+    default: '.'
+  dockerfile:
+    description: 'Path to the Dockerfile.'
+    required: false
+    default: './Dockerfile'
+  cache-scope:
+    description: 'GHA cache scope. Each workflow should have a unique value.'
+    required: false
+    default: 'release-build'
+  build-args:
+    description: 'Multiline KEY=value build-args passed through to docker/build-push-action.'
+    required: false
+    default: ''
+  tags-format:
+    description: 'docker/metadata-action tag rules.'
+    required: false
+    default: |
+      type=match,pattern=v(\d+),group=1
+      type=match,pattern=v(\d+\.\d+),group=1
+      type=match,pattern=v(\d+\.\d+\.\d+),group=1
+      type=sha
+      type=raw,value=latest,enable=${{
+        github.event_name == 'release'
+        && github.event.release.draft == false
+        && github.event.release.prerelease == false
+      }}
+
+outputs:
+  digest:
+    description: 'image digest'
+    value: ${{ steps.push.outputs.digest }}
+  metadata:
+    description: 'build metadata json'
+    value: ${{ steps.meta.outputs.json }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: resolve base image to digest
+      id: base-image
+      shell: bash
+      env:
+        DOCKERFILE: ${{ inputs.dockerfile }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f "$DOCKERFILE" ]]; then
+          echo "::error::Dockerfile not found: $DOCKERFILE"
+          exit 1
+        fi
+
+        line=$(grep -m1 -E '^ARG[[:space:]]+BASE_IMAGE=' "$DOCKERFILE" | tr -d '\r' || true)
+        if [[ -z "$line" ]]; then
+          echo "No 'ARG BASE_IMAGE=' line in $DOCKERFILE: skipping base image pin."
+          echo "build-arg=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        base_image=${line#*=}
+        base_image=${base_image%\"}
+        base_image=${base_image#\"}
+
+        if [[ "$base_image" == *"@sha256:"* ]]; then
+          pinned="$base_image"
+        else
+          digest=$(docker buildx imagetools inspect "$base_image" --format '{{json .Manifest}}' \
+            | jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest')
+          pinned="${base_image%:*}@${digest}"
+        fi
+
+        echo "Resolved $base_image -> $pinned"
+        echo "build-arg=BASE_IMAGE=$pinned" >> "$GITHUB_OUTPUT"
+
+    - name: resolve SOURCE_DATE_EPOCH
+      id: source-date-epoch
+      shell: bash
+      env:
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+      run: |
+        set -euo pipefail
+
+        if ! grep -qE '^ARG[[:space:]]+SOURCE_DATE_EPOCH([[:space:]]|=|$)' "$DOCKERFILE"; then
+          echo "No 'ARG SOURCE_DATE_EPOCH' line in $DOCKERFILE; skipping."
+          echo "build-arg=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [[ -n "${RELEASE_PUBLISHED_AT:-}" ]]; then
+          sde=$(date -d "$RELEASE_PUBLISHED_AT" +%s)
+          echo "SOURCE_DATE_EPOCH from release publish time: $sde ($RELEASE_PUBLISHED_AT)"
+        elif sde=$(git log -1 --format=%ct HEAD 2>/dev/null); then
+          echo "SOURCE_DATE_EPOCH from HEAD commit time: $sde"
+        else
+          echo "No release or git context: skipping SOURCE_DATE_EPOCH."
+          echo "build-arg=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "build-arg=SOURCE_DATE_EPOCH=$sde" >> "$GITHUB_OUTPUT"
+
+    - name: set up docker buildx
+      uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+    - name: log in to ${{ inputs.registry }}
+      uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - name: extract container metadata
+      id: meta
+      uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+      env:
+        DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+      with:
+        images: ${{ inputs.registry }}/${{ inputs.image-name }}
+        tags: ${{ inputs.tags-format }}
+
+    - name: build and push container image
+      id: push
+      uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        annotations: ${{ steps.meta.outputs.annotations }}
+        build-args: |
+          ${{ inputs.build-args }}
+          ${{ steps.base-image.outputs.build-arg }}
+          ${{ steps.source-date-epoch.outputs.build-arg }}
+        cache-from: type=gha,scope=${{ inputs.cache-scope }}
+        cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
+        provenance: mode=max
+        sbom: true
+
+    - name: generate attestation
+      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+      with:
+        subject-name: ${{ inputs.registry }}/${{ inputs.image-name }}
+        subject-digest: ${{ steps.push.outputs.digest }}
+        push-to-registry: true

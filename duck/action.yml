@@ -1,0 +1,30 @@
+name: 'duck'
+description: 'Dependency Update ChecK: checks for new releases of deps in .github/duck.json and opens a version-bump PR.'
+
+# Caller must have
+#     contents: write       # commit the version file and create the bot branch
+#     pull-requests: write  # create or update the dependency-update PR
+
+runs:
+  using: "composite"
+  steps:
+    - name: checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        fetch-depth: 1
+
+    - name: install action dependencies
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: npm ci --silent --omit=dev --prefix "$ACTION_PATH"
+
+    - name: check dependencies
+      id: check-deps
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      with:
+        script: |
+          const { run } = require(process.env.ACTION_PATH + "/check-deps.js");
+          await run({ github, context, core });

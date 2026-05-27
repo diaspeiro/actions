@@ -1,0 +1,34 @@
+name: 'load-dependency-versions'
+description: 'Reads a KEY=value dependency-versions file (as produced by duck) and exposes its content as a multiline string suitable for docker/build-push-action build-args.'
+
+inputs:
+  file:
+    description: 'Path to the dependency versions file.'
+    required: false
+    default: '.github/dependency-versions'
+
+outputs:
+  build-args:
+    description: 'Multiline KEY=value string for docker/build-push-action build-args. Empty if the file is absent or contains no entries.'
+    value: ${{ steps.read.outputs.build-args }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: read dependency versions
+      id: read
+      shell: bash
+      env:
+        VERSIONS_FILE: ${{ inputs.file }}
+      run: |
+        if [ -f "$VERSIONS_FILE" ]; then
+          content=$(grep -vE '^(#|$)' "$VERSIONS_FILE" || true)
+          if [ -n "$content" ]; then
+            delim="EOF_$(uuidgen)"
+            {
+              echo "build-args<<$delim"
+              echo "$content"
+              echo "$delim"
+            } >> "$GITHUB_OUTPUT"
+          fi
+        fi
