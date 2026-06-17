@@ -24,7 +24,7 @@ async function run({ github, context, core, configPath, versionFilePath, hash = 
 
   core.info("Current dependency versions:");
   for (const dep of dependencies) {
-    core.info(`  - ${dep.repo}: ${branchVersions[dep.name]?.version || "(not set)"}`);
+    core.info(`  - ${dep.name}: ${branchVersions[dep.name]?.version || "(not set)"}`);
   }
 
   // Locked deps are held deliberately; surface a visible annotation every run so a
@@ -38,7 +38,7 @@ async function run({ github, context, core, configPath, versionFilePath, hash = 
   const lookups = await Promise.all(
     dependencies.map(async (dep) => ({ dep, resolved: await getLatestVersion(deps, dep) })),
   );
-  const failed = lookups.filter(({ resolved }) => resolved === null).map(({ dep }) => dep.repo);
+  const failed = lookups.filter(({ resolved }) => resolved === null).map(({ dep }) => `${dep.name} (${dep.repo})`);
   if (failed.length > 0) {
     core.setFailed(`Upstream resolution failed for: ${failed.join(", ")}. Refusing to write a partial version file.`);
     return;
@@ -62,7 +62,7 @@ async function run({ github, context, core, configPath, versionFilePath, hash = 
       entries.push({ dep, entry });
     } catch (error) {
       core.warning(`Failed to hash ${dep.name} (${resolved.url}): ${error.message}`);
-      hashFailures.push(dep.repo);
+      hashFailures.push(`${dep.name} (${dep.repo})`);
     }
   }
   if (hashFailures.length > 0) {
@@ -74,7 +74,7 @@ async function run({ github, context, core, configPath, versionFilePath, hash = 
   for (const { dep, entry } of entries) {
     if (!entriesEqual(branchVersions[dep.name], entry)) {
       updates[dep.name] = entry;
-      core.info(`  - ${dep.repo}: ${branchVersions[dep.name]?.version || "(not set)"} -> ${entry.version}`);
+      core.info(`  - ${dep.name}: ${branchVersions[dep.name]?.version || "(not set)"} -> ${entry.version}`);
       core.setOutput(`${dep.name}_version`, entry.version);
     }
   }
