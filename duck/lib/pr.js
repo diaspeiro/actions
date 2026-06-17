@@ -1,4 +1,4 @@
-const { buildVersionFileContent, VERSION_FILE } = require("./version-file");
+const { buildVersionFileContent, entriesEqual, VERSION_FILE } = require("./version-file");
 
 const BRANCH_NAME = "bot/dependency-updates";
 
@@ -69,12 +69,13 @@ async function createOrUpdatePR(deps, dependencies, updates, baseVersions, branc
   // Body describes the cumulative diff vs the base branch, not vs the bot branch.
   const allUpdates = dependencies
     .map((dep) => {
-      const finalVersion = updates[dep.name] || branchVersions[dep.name];
-      const baseVersion = baseVersions[dep.name];
-      if (!finalVersion || finalVersion === baseVersion) return null;
-      return baseVersion
-        ? `- Updated ${dep.name} from ${baseVersion} to ${finalVersion}`
-        : `- Added ${dep.name} version ${finalVersion}`;
+      const final = updates[dep.name] || branchVersions[dep.name];
+      const base = baseVersions[dep.name];
+      if (!final || entriesEqual(final, base)) return null;
+      const lock = final.locked ? " (locked)" : "";
+      if (!base) return `- Added ${dep.name} version ${final.version}${lock}`;
+      if (base.version === final.version) return `- Re-pinned ${dep.name} at ${final.version}${lock}`;
+      return `- Updated ${dep.name} from ${base.version} to ${final.version}${lock}`;
     })
     .filter(Boolean);
 

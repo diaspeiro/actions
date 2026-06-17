@@ -41,6 +41,10 @@ function makeGithub(overrides = {}) {
       repos: {
         getContent: wrap("repos.getContent"),
         createOrUpdateFileContents: wrap("repos.createOrUpdateFileContents"),
+        getCommit: wrap("repos.getCommit"),
+        // Referenced (not called) by upstream when handing a fn to paginate.iterator.
+        listReleases: function listReleases() {},
+        listTags: function listTags() {},
       },
       git: {
         getRef: wrap("git.getRef"),
@@ -82,10 +86,24 @@ function httpError(status, message) {
   return err;
 }
 
+// A deterministic stub for the injected hasher: maps url -> sha256, and records
+// every url it was asked to hash so tests can assert which artifacts downloaded.
+function makeFetchSha(map = {}) {
+  const hashed = [];
+  const fn = async (url) => {
+    hashed.push(url);
+    if (!(url in map)) throw new Error(`unexpected hash url ${url}`);
+    return map[url];
+  };
+  fn.hashed = hashed;
+  return fn;
+}
+
 module.exports = {
   withTempFile,
   noopCore,
   makeGithub,
   makeRecordingCore,
   httpError,
+  makeFetchSha,
 };

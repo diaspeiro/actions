@@ -1,9 +1,12 @@
 const { loadConfiguration } = require("./lib/config");
-const { getDependencyVersions } = require("./lib/version-file");
+const { getDependencyVersions, entryChanged, entriesEqual } = require("./lib/version-file");
 const { getLatestVersion } = require("./lib/upstream");
+const { fetchSha256 } = require("./lib/hash");
 const { findExistingPR, createOrUpdatePR, BRANCH_NAME } = require("./lib/pr");
 
-async function run({ github, context, core, configPath, versionFilePath } = {}) {
+const isLocked = (dep) => Boolean(dep.lock) || dep.type === "commit";
+
+async function run({ github, context, core, configPath, versionFilePath, hash = fetchSha256 } = {}) {
   const deps = { github, context, core };
 
   if (!context.ref.startsWith("refs/heads/")) {
@@ -21,26 +24,58 @@ async function run({ github, context, core, configPath, versionFilePath } = {}) 
 
   core.info("Current dependency versions:");
   for (const dep of dependencies) {
-    const version = branchVersions[dep.name] || "(not set)";
-    core.info(`  - ${dep.repo}: ${version}`);
+    core.info(`  - ${dep.repo}: ${branchVersions[dep.name]?.version || "(not set)"}`);
   }
 
-  core.info("\nChecking for upstream updates...");
-  const updates = {};
+  // Locked deps are held deliberately; surface a visible annotation every run so a
+  // held-back version never rots silently.
+  for (const dep of dependencies.filter(isLocked)) {
+    const held = dep.lock ?? dep.commit;
+    core.notice(`${dep.name} is locked to ${held} and will not be auto-updated.`);
+  }
 
+  core.info("\nResolving upstream artifacts...");
   const lookups = await Promise.all(
-    dependencies.map(async (dep) => ({ dep, latest: await getLatestVersion(deps, dep) })),
+    dependencies.map(async (dep) => ({ dep, resolved: await getLatestVersion(deps, dep) })),
   );
-  const failed = lookups.filter(({ latest }) => latest === null).map(({ dep }) => dep.repo);
+  const failed = lookups.filter(({ resolved }) => resolved === null).map(({ dep }) => dep.repo);
   if (failed.length > 0) {
-    core.setFailed(`Upstream lookup failed for: ${failed.join(", ")}. Refusing to write a partial version file.`);
+    core.setFailed(`Upstream resolution failed for: ${failed.join(", ")}. Refusing to write a partial version file.`);
     return;
   }
-  for (const { dep, latest } of lookups) {
-    if (latest !== branchVersions[dep.name]) {
-      updates[dep.name] = latest;
-      core.info(`  - ${dep.repo}: ${branchVersions[dep.name] || "(not set)"} -> ${latest}`);
-      core.setOutput(`${dep.name}_version`, latest);
+
+  // Hash each artifact, reusing the recorded sha256 when version+url are unchanged.
+  const entries = [];
+  const hashFailures = [];
+  for (const { dep, resolved } of lookups) {
+    const prev = branchVersions[dep.name];
+    try {
+      let sha256;
+      if (prev && !entryChanged(prev, resolved) && prev.sha256) {
+        sha256 = prev.sha256;
+      } else {
+        core.info(`  - ${dep.name}: hashing ${resolved.url}`);
+        sha256 = await hash(resolved.url);
+      }
+      const entry = { version: resolved.version, url: resolved.url, sha256 };
+      if (isLocked(dep)) entry.locked = true;
+      entries.push({ dep, entry });
+    } catch (error) {
+      core.warning(`Failed to hash ${dep.name} (${resolved.url}): ${error.message}`);
+      hashFailures.push(dep.repo);
+    }
+  }
+  if (hashFailures.length > 0) {
+    core.setFailed(`Hashing failed for: ${hashFailures.join(", ")}. Refusing to write a partial version file.`);
+    return;
+  }
+
+  const updates = {};
+  for (const { dep, entry } of entries) {
+    if (!entriesEqual(branchVersions[dep.name], entry)) {
+      updates[dep.name] = entry;
+      core.info(`  - ${dep.repo}: ${branchVersions[dep.name]?.version || "(not set)"} -> ${entry.version}`);
+      core.setOutput(`${dep.name}_version`, entry.version);
     }
   }
 
