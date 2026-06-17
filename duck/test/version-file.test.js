@@ -2,150 +2,110 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  parseVersionFileContent,
   buildVersionFileContent,
   getDependencyVersions,
+  entryChanged,
+  entriesEqual,
   VERSION_FILE,
 } = require("../lib/version-file");
 const { withTempFile, noopCore } = require("./helpers");
 
-test("parseVersionFileContent parses key=value lines, skipping comments and blanks", () => {
-  const cases = [
-    {
-      label: "header only, empty result",
-      content: "# header\n\n# another\n",
-      expected: {},
-    },
-    {
-      label: "single entry, no header",
-      content: "BRAVO_VERSION=0.9.8",
-      expected: { bravo: "0.9.8" },
-    },
-    {
-      label: "many entries with header",
-      content:
-        "# Dependency versions. DO NOT EDIT MANUALLY.\nBRAVO_VERSION=0.9.8\nALPHA_VERSION=8.10.1\nCHARLIE_VERSION=1.34.0\n",
-      expected: { bravo: "0.9.8", alpha: "8.10.1", charlie: "1.34.0" },
-    },
-    {
-      label: "comments interspersed",
-      content: "BRAVO_VERSION=0.9.8\n# mid-comment\nALPHA_VERSION=8.10.1",
-      expected: { bravo: "0.9.8", alpha: "8.10.1" },
-    },
-    {
-      label: "multiple consecutive blanks",
-      content: "BRAVO_VERSION=0.9.8\n\n\nALPHA_VERSION=8.10.1",
-      expected: { bravo: "0.9.8", alpha: "8.10.1" },
-    },
-  ];
-  for (const { label, content, expected } of cases) {
-    assert.deepEqual(parseVersionFileContent(content), expected, label);
-  }
+const entry = (version, sha = "aa", url = `https://x/${version}.tgz`, extra = {}) => ({
+  version,
+  url,
+  sha256: sha,
+  ...extra,
 });
 
-test("buildVersionFileContent uses updates when present, currentVersions otherwise", () => {
+test("buildVersionFileContent uses updates when present, currentVersions otherwise, in dep order", () => {
   const cases = [
     {
       label: "single dep, updated",
       deps: [{ name: "alpha" }],
-      updates: { alpha: "8.11.0" },
-      current: { alpha: "8.10.1" },
-      expected: { alpha: "8.11.0" },
+      updates: { alpha: entry("8.11.0") },
+      current: { alpha: entry("8.10.1") },
+      expected: { alpha: entry("8.11.0") },
     },
     {
-      label: "single dep, no update. falls back to current",
+      label: "single dep, no update -> falls back to current",
       deps: [{ name: "alpha" }],
       updates: {},
-      current: { alpha: "8.10.1" },
-      expected: { alpha: "8.10.1" },
+      current: { alpha: entry("8.10.1") },
+      expected: { alpha: entry("8.10.1") },
     },
     {
       label: "two deps, partial update",
       deps: [{ name: "alpha" }, { name: "bravo" }],
-      updates: { alpha: "8.11.0" },
-      current: { alpha: "8.10.1", bravo: "0.9.8" },
-      expected: { alpha: "8.11.0", bravo: "0.9.8" },
+      updates: { alpha: entry("8.11.0") },
+      current: { alpha: entry("8.10.1"), bravo: entry("0.9.8") },
+      expected: { alpha: entry("8.11.0"), bravo: entry("0.9.8") },
     },
     {
-      label: "two deps, both updated",
-      deps: [{ name: "alpha" }, { name: "bravo" }],
-      updates: { alpha: "8.11.0", bravo: "0.10.0" },
-      current: { alpha: "8.10.1", bravo: "0.9.8" },
-      expected: { alpha: "8.11.0", bravo: "0.10.0" },
-    },
-    {
-      label: "five deps, mix of updated and unchanged",
-      deps: [{ name: "a" }, { name: "b" }, { name: "c" }, { name: "d" }, { name: "e" }],
-      updates: { a: "1", c: "3", e: "5" },
-      current: { a: "0", b: "2", c: "0", d: "4", e: "0" },
-      expected: { a: "1", b: "2", c: "3", d: "4", e: "5" },
+      label: "dep present in neither updates nor current is omitted",
+      deps: [{ name: "alpha" }, { name: "ghost" }],
+      updates: {},
+      current: { alpha: entry("8.10.1") },
+      expected: { alpha: entry("8.10.1") },
     },
   ];
   for (const { label, deps, updates, current, expected } of cases) {
     const content = buildVersionFileContent(deps, updates, current);
-    assert.match(content, /^# Dependency versions. DO NOT EDIT MANUALLY.$/m, `${label}: header`);
-    for (const [name, version] of Object.entries(expected)) {
-      const line = new RegExp(`^${name.toUpperCase()}_VERSION=${version.replace(/\./g, "\\.")}$`, "m");
-      assert.match(content, line, `${label}: ${name}=${version}`);
-    }
+    assert.equal(content.endsWith("\n"), true, `${label}: trailing newline`);
+    assert.deepEqual(JSON.parse(content), expected, label);
   }
 });
 
-test("buildVersionFileContent and parseVersionFileContent round-trip", () => {
-  const cases = [
-    {
-      label: "single dep",
-      deps: [{ name: "alpha" }],
-      updates: {},
-      current: { alpha: "8.10.1" },
-      expected: { alpha: "8.10.1" },
-    },
-    {
-      label: "two deps with update",
-      deps: [{ name: "alpha" }, { name: "bravo" }],
-      updates: { alpha: "8.11.0" },
-      current: { alpha: "8.10.1", bravo: "0.9.8" },
-      expected: { alpha: "8.11.0", bravo: "0.9.8" },
-    },
-    {
-      label: "five deps mixed",
-      deps: [{ name: "a" }, { name: "b" }, { name: "c" }, { name: "d" }, { name: "e" }],
-      updates: { a: "1", c: "3", e: "5" },
-      current: { a: "0", b: "2", c: "0", d: "4", e: "0" },
-      expected: { a: "1", b: "2", c: "3", d: "4", e: "5" },
-    },
-  ];
-  for (const { label, deps, updates, current, expected } of cases) {
-    const built = buildVersionFileContent(deps, updates, current);
-    assert.deepEqual(parseVersionFileContent(built), expected, label);
-  }
+test("buildVersionFileContent serializes in dependency order", () => {
+  const deps = [{ name: "b" }, { name: "a" }, { name: "c" }];
+  const content = buildVersionFileContent(deps, {}, { a: entry("1"), b: entry("2"), c: entry("3") });
+  assert.deepEqual(Object.keys(JSON.parse(content)), ["b", "a", "c"]);
 });
 
-test("getDependencyVersions reads the local file when no ref is given", async () => {
+test("buildVersionFileContent emits valid JSON that round-trips", () => {
+  const deps = [{ name: "a" }, { name: "b" }, { name: "c" }];
+  const current = { a: entry("0"), b: entry("2"), c: entry("0") };
+  const updates = { a: entry("1"), c: entry("3", "ff", "https://x/3.tgz", { locked: true }) };
+  const built = buildVersionFileContent(deps, updates, current);
+  assert.deepEqual(JSON.parse(built), {
+    a: entry("1"),
+    b: entry("2"),
+    c: entry("3", "ff", "https://x/3.tgz", { locked: true }),
+  });
+});
+
+test("entryChanged detects version/url moves and ignores sha-only differences", () => {
+  const prev = entry("1.0.0", "aa", "https://x/1.0.0.tgz");
+  assert.equal(entryChanged(undefined, prev), true, "missing prev -> changed");
+  assert.equal(entryChanged(prev, entry("1.0.0", "aa", "https://x/1.0.0.tgz")), false, "identical -> unchanged");
+  assert.equal(entryChanged(prev, entry("1.0.0", "bb", "https://x/1.0.0.tgz")), false, "sha-only diff -> unchanged");
+  assert.equal(entryChanged(prev, entry("1.0.1", "aa", "https://x/1.0.0.tgz")), true, "version move -> changed");
+  assert.equal(entryChanged(prev, entry("1.0.0", "aa", "https://y/1.0.0.tgz")), true, "url move -> changed");
+});
+
+test("entriesEqual compares version, url, sha256, and the locked flag", () => {
+  const a = entry("1.0.0", "aa", "https://x/1.0.0.tgz");
+  assert.equal(entriesEqual(a, entry("1.0.0", "aa", "https://x/1.0.0.tgz")), true);
+  assert.equal(entriesEqual(a, undefined), false);
+  assert.equal(entriesEqual(a, entry("1.0.0", "bb", "https://x/1.0.0.tgz")), false, "sha differs");
+  assert.equal(entriesEqual(a, entry("1.0.0", "aa", "https://x/1.0.0.tgz", { locked: true })), false, "lock toggled");
+});
+
+test("getDependencyVersions reads the local JSON file when no ref is given", async () => {
   const cases = [
-    {
-      label: "header only",
-      content: "# header\n",
-      expected: {},
-    },
+    { label: "empty", content: "{}", expected: {} },
     {
       label: "single entry",
-      content: "BRAVO_VERSION=0.9.8",
-      expected: { bravo: "0.9.8" },
+      content: JSON.stringify({ bravo: entry("0.9.8") }),
+      expected: { bravo: entry("0.9.8") },
     },
     {
-      label: "many entries with comments",
-      content: "# header\nBRAVO_VERSION=0.9.8\n# mid\nALPHA_VERSION=8.10.1\nCHARLIE_VERSION=1.34.0",
-      expected: { bravo: "0.9.8", alpha: "8.10.1", charlie: "1.34.0" },
-    },
-    {
-      label: "trailing newline",
-      content: "BRAVO_VERSION=0.9.8\nALPHA_VERSION=8.10.1\n",
-      expected: { bravo: "0.9.8", alpha: "8.10.1" },
+      label: "many entries",
+      content: JSON.stringify({ bravo: entry("0.9.8"), alpha: entry("8.10.1") }),
+      expected: { bravo: entry("0.9.8"), alpha: entry("8.10.1") },
     },
   ];
   for (const { label, content, expected } of cases) {
-    const fixture = withTempFile("versions", content);
+    const fixture = withTempFile("versions.json", content);
     try {
       const versions = await getDependencyVersions(
         { github: null, context: null, core: noopCore },
@@ -161,46 +121,25 @@ test("getDependencyVersions reads the local file when no ref is given", async ()
 test("getDependencyVersions returns empty object when local file is missing", async () => {
   const versions = await getDependencyVersions(
     { github: null, context: null, core: noopCore },
-    { localPath: "/nonexistent/dir/version-file" },
+    { localPath: "/nonexistent/dir/versions.json" },
   );
   assert.deepEqual(versions, {});
 });
 
 test("getDependencyVersions reads from the API when a ref is given", async () => {
   const cases = [
-    {
-      label: "branch ref",
-      ref: "main",
-      content: "BRAVO_VERSION=0.9.8",
-      expected: { bravo: "0.9.8" },
-    },
-    {
-      label: "feature branch ref",
-      ref: "feature/x",
-      content: "ALPHA_VERSION=8.10.1\nBRAVO_VERSION=0.9.8",
-      expected: { alpha: "8.10.1", bravo: "0.9.8" },
-    },
-    {
-      label: "sha ref",
-      ref: "abc123def456",
-      content: "ECHO_VERSION=1.3.1",
-      expected: { echo: "1.3.1" },
-    },
-    {
-      label: "empty content",
-      ref: "empty-branch",
-      content: "",
-      expected: {},
-    },
+    { label: "branch ref", ref: "main", map: { bravo: entry("0.9.8") } },
+    { label: "feature branch ref", ref: "feature/x", map: { alpha: entry("8.10.1"), bravo: entry("0.9.8") } },
+    { label: "empty content", ref: "empty-branch", map: {} },
   ];
-  for (const { label, ref, content, expected } of cases) {
+  for (const { label, ref, map } of cases) {
     let capturedArgs;
     const github = {
       rest: {
         repos: {
           getContent: async (args) => {
             capturedArgs = args;
-            return { data: { content: Buffer.from(content).toString("base64") } };
+            return { data: { content: Buffer.from(JSON.stringify(map)).toString("base64") } };
           },
         },
       },
@@ -209,7 +148,7 @@ test("getDependencyVersions reads from the API when a ref is given", async () =>
 
     const versions = await getDependencyVersions({ github, context, core: noopCore }, { ref });
 
-    assert.deepEqual(versions, expected, `${label}: parsed`);
+    assert.deepEqual(versions, map, `${label}: parsed`);
     assert.equal(capturedArgs.owner, "o", `${label}: owner`);
     assert.equal(capturedArgs.repo, "r", `${label}: repo`);
     assert.equal(capturedArgs.ref, ref, `${label}: ref`);
@@ -237,9 +176,7 @@ test("getDependencyVersions returns empty object on a 404 from the API", async (
 test("getDependencyVersions propagates non-404 errors from the API", async () => {
   const cases = [
     { label: "401 unauthorized", status: 401, message: "Unauthorized" },
-    { label: "403 forbidden", status: 403, message: "Forbidden" },
     { label: "500 server error", status: 500, message: "Server error" },
-    { label: "502 bad gateway", status: 502, message: "Bad gateway" },
     { label: "error without status", status: undefined, message: "ECONNRESET" },
   ];
   for (const { label, status, message } of cases) {

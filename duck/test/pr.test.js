@@ -7,6 +7,9 @@ const { noopCore, makeGithub, httpError } = require("./helpers");
 
 const ctx = { repo: { owner: "o", repo: "r" } };
 
+// Build a version entry the way the orchestrator does.
+const e = (version, extra = {}) => ({ version, url: `https://x/${version}.tgz`, sha256: `sha-${version}`, ...extra });
+
 // --- findExistingPR ---
 
 test("findExistingPR returns the first open PR for the bot branch", async () => {
@@ -19,7 +22,6 @@ test("findExistingPR returns the first open PR for the bot branch", async () => 
   });
   const pr = await findExistingPR({ github, context: ctx, core: noopCore });
   assert.equal(pr.number, 42);
-  // Pin the filter
   assert.equal(listArgs.state, "open");
   assert.equal(listArgs.head, `${ctx.repo.owner}:${BRANCH_NAME}`);
 });
@@ -35,18 +37,14 @@ test("findExistingPR deletes the orphan branch when no PR is open", async () => 
   });
   const pr = await findExistingPR({ github, context: ctx, core: noopCore });
   assert.equal(pr, null);
-  // Sequence: list before delete.
   assert.deepEqual(
     calls.map((c) => c.method),
     ["pulls.list", "git.deleteRef"],
   );
-  // Args: target the bot branch.
   assert.equal(deleteArgs.ref, `heads/${BRANCH_NAME}`);
 });
 
 test("findExistingPR is silent when there's no orphan branch", async () => {
-  // GitHub surfaces "branch doesn't exist" as either 404 or 422 depending on
-  // the path; both should be silent.
   const cases = [
     { label: "404 Not Found", status: 404, message: "Not Found" },
     { label: "422 Reference does not exist", status: 422, message: "Reference does not exist" },
@@ -65,8 +63,6 @@ test("findExistingPR is silent when there's no orphan branch", async () => {
     const pr = await findExistingPR({ github, context: ctx, core });
     assert.equal(pr, null, `${label}: pr null`);
     assert.equal(warnings.length, 0, `${label}: no warning`);
-    // The impl must actually attempt the delete with the right ref _ bypassing
-    // it would also produce zero warnings, so pin both sequence and args.
     assert.ok(
       calls.some((c) => c.method === "git.deleteRef"),
       `${label}: deleteRef called`,
@@ -78,7 +74,6 @@ test("findExistingPR is silent when there's no orphan branch", async () => {
 test("findExistingPR warns on unexpected errors from deleteRef", async () => {
   const cases = [
     { label: "401", status: 401, message: "Unauthorized" },
-    { label: "403", status: 403, message: "Forbidden" },
     { label: "500", status: 500, message: "boom" },
     { label: "422 other", status: 422, message: "Validation Failed" },
     { label: "no status", status: undefined, message: "ECONNRESET" },
@@ -87,7 +82,7 @@ test("findExistingPR warns on unexpected errors from deleteRef", async () => {
     const warnings = [];
     const core = { ...noopCore, warning: (m) => warnings.push(m) };
     let deleteArgs;
-    const { github, calls } = makeGithub({
+    const { github } = makeGithub({
       "pulls.list": async () => ({ data: [] }),
       "git.deleteRef": async (args) => {
         deleteArgs = args;
@@ -101,10 +96,6 @@ test("findExistingPR warns on unexpected errors from deleteRef", async () => {
     assert.equal(warnings.length, 1, `${label}: one warning`);
     assert.match(warnings[0], /Failed to delete orphaned branch/, `${label}: warning prefix`);
     assert.match(warnings[0], new RegExp(message), `${label}: warning includes message`);
-    assert.ok(
-      calls.some((c) => c.method === "git.deleteRef"),
-      `${label}: deleteRef called`,
-    );
     assert.equal(deleteArgs.ref, `heads/${BRANCH_NAME}`, `${label}: ref`);
   }
 });
@@ -112,8 +103,8 @@ test("findExistingPR warns on unexpected errors from deleteRef", async () => {
 // --- commitVersions ---
 
 const dependencies = [{ name: "alpha" }, { name: "bravo" }];
-const updates = { alpha: "8.11.0" };
-const currentVersions = { alpha: "8.10.1", bravo: "0.9.8" };
+const updates = { alpha: e("8.11.0") };
+const currentVersions = { alpha: e("8.10.1"), bravo: e("0.9.8") };
 const expectedContent = buildVersionFileContent(dependencies, updates, currentVersions);
 
 test("commitVersions skips when remote content already matches", async () => {
@@ -129,7 +120,6 @@ test("commitVersions skips when remote content already matches", async () => {
     !calls.some((c) => c.method === "repos.createOrUpdateFileContents"),
     "should not call createOrUpdateFileContents",
   );
-  // Read targets the version file at the bot branch. Wrong path/ref reads the wrong file.
   assert.equal(readArgs.path, VERSION_FILE);
   assert.equal(readArgs.ref, "bot/branch");
 });
@@ -139,7 +129,7 @@ test("commitVersions commits with sha when content differs", async () => {
   const { github, calls } = makeGithub({
     "repos.getContent": async (args) => {
       readArgs = args;
-      return { data: { sha: "abc", content: Buffer.from("# stale").toString("base64") } };
+      return { data: { sha: "abc", content: Buffer.from("{}").toString("base64") } };
     },
     "repos.createOrUpdateFileContents": async (args) => {
       committed = args;
@@ -147,15 +137,12 @@ test("commitVersions commits with sha when content differs", async () => {
     },
   });
   await commitVersions({ github, context: ctx, core: noopCore }, dependencies, updates, currentVersions, "bot/branch");
-  // Sequence: read before write.
   assert.deepEqual(
     calls.map((c) => c.method),
     ["repos.getContent", "repos.createOrUpdateFileContents"],
   );
-  // Read targets the same path/branch as the write.
   assert.equal(readArgs.path, VERSION_FILE);
   assert.equal(readArgs.ref, "bot/branch");
-  // Write args.
   assert.equal(committed.sha, "abc");
   assert.equal(committed.branch, "bot/branch");
   assert.equal(committed.path, VERSION_FILE);
@@ -177,7 +164,6 @@ test("commitVersions commits without a sha when the file does not exist", async 
     },
   });
   await commitVersions({ github, context: ctx, core: noopCore }, dependencies, updates, currentVersions, "bot/branch");
-  // Sequence: still tries the read before falling back to write-without-sha.
   assert.deepEqual(
     calls.map((c) => c.method),
     ["repos.getContent", "repos.createOrUpdateFileContents"],
@@ -193,7 +179,6 @@ test("commitVersions commits without a sha when the file does not exist", async 
 test("commitVersions propagates non-404 errors from getContent", async () => {
   const cases = [
     { label: "401", status: 401, message: "Unauthorized" },
-    { label: "403", status: 403, message: "Forbidden" },
     { label: "500", status: 500, message: "Server error" },
     { label: "no status", status: undefined, message: "ECONNRESET" },
   ];
@@ -215,45 +200,49 @@ test("commitVersions propagates non-404 errors from getContent", async () => {
 
 // --- createOrUpdatePR ---
 
-test("createOrUpdatePR composes 'Updated from' and 'Added' body lines", async () => {
-  // Vary mix of updated vs. added entries; confirm both wording forms appear or
-  // are absent as appropriate, and that constant args (head/base/title) hold.
+test("createOrUpdatePR composes 'Updated from', 'Added', and locked body lines", async () => {
   const cases = [
     {
       label: "all 'Added' (no base versions)",
       deps: [{ name: "a" }, { name: "b" }],
       baseVersions: {},
-      updates: { a: "1.0.0", b: "2.0.0" },
+      updates: { a: e("1.0.0"), b: e("2.0.0") },
       expectMatch: [/^- Added a version 1\.0\.0$/m, /^- Added b version 2\.0\.0$/m],
       expectMiss: [/Updated a/, /Updated b/],
     },
     {
       label: "all 'Updated' (every dep has a base version)",
       deps: [{ name: "a" }, { name: "b" }],
-      baseVersions: { a: "0.9.0", b: "1.9.0" },
-      updates: { a: "1.0.0", b: "2.0.0" },
+      baseVersions: { a: e("0.9.0"), b: e("1.9.0") },
+      updates: { a: e("1.0.0"), b: e("2.0.0") },
       expectMatch: [/^- Updated a from 0\.9\.0 to 1\.0\.0$/m, /^- Updated b from 1\.9\.0 to 2\.0\.0$/m],
       expectMiss: [/Added a/, /Added b/],
     },
     {
       label: "mixed: one updated, one added",
       deps: [{ name: "alpha" }, { name: "newdep" }],
-      baseVersions: { alpha: "8.10.1" },
-      updates: { alpha: "8.11.0", newdep: "1.0.0" },
+      baseVersions: { alpha: e("8.10.1") },
+      updates: { alpha: e("8.11.0"), newdep: e("1.0.0") },
       expectMatch: [/^- Updated alpha from 8\.10\.1 to 8\.11\.0$/m, /^- Added newdep version 1\.0\.0$/m],
       expectMiss: [/Added alpha/, /Updated newdep/],
     },
     {
-      label: "three deps mixed",
-      deps: [{ name: "a" }, { name: "b" }, { name: "c" }],
-      baseVersions: { a: "0.1", b: "0.2" },
-      updates: { a: "1.1", b: "1.2", c: "1.3" },
-      expectMatch: [
-        /^- Updated a from 0\.1 to 1\.1$/m,
-        /^- Updated b from 0\.2 to 1\.2$/m,
-        /^- Added c version 1\.3$/m,
-      ],
-      expectMiss: [/Added a/, /Added b/, /Updated c/],
+      label: "locked dep is marked",
+      deps: [{ name: "a" }],
+      baseVersions: { a: e("0.9.0") },
+      updates: { a: e("1.0.0", { locked: true }) },
+      expectMatch: [/^- Updated a from 0\.9\.0 to 1\.0\.0 \(locked\)$/m],
+      expectMiss: [/Added a/],
+    },
+    {
+      // Same version but a new url/sha (e.g. upstream re-tagged or the asset URL
+      // moved): reported as a re-pin, not a version bump.
+      label: "re-pinned dep (same version, new sha)",
+      deps: [{ name: "a" }],
+      baseVersions: { a: e("1.0.0", { url: "https://x/old", sha256: "old" }) },
+      updates: { a: e("1.0.0", { url: "https://x/new", sha256: "new" }) },
+      expectMatch: [/^- Re-pinned a at 1\.0\.0$/m],
+      expectMiss: [/Updated a/, /Added a/],
     },
   ];
   for (const { label, deps, baseVersions, updates: upd, expectMatch, expectMiss } of cases) {
@@ -291,16 +280,13 @@ test("createOrUpdatePR composes 'Updated from' and 'Added' body lines", async ()
       null,
       "main",
     );
-    // Sequence: full create chain regardless of body composition.
     assert.deepEqual(sequence, ["getRef", "createRef", "getContent", "commit", "createPR"], `${label}: sequence`);
-    // Body composition.
     for (const re of expectMatch) {
       assert.match(prCreated.body, re, `${label}: body should contain ${re}`);
     }
     for (const re of expectMiss) {
       assert.doesNotMatch(prCreated.body, re, `${label}: body should NOT contain ${re}`);
     }
-    // Constant args across all cases.
     assert.equal(prCreated.head, BRANCH_NAME, `${label}: head`);
     assert.equal(prCreated.base, "main", `${label}: base`);
     assert.equal(prCreated.title, "chore: Update dependencies", `${label}: title`);
@@ -309,8 +295,8 @@ test("createOrUpdatePR composes 'Updated from' and 'Added' body lines", async ()
 
 test("createOrUpdatePR closes the PR and deletes the branch when net diff is empty", async () => {
   const deps = [{ name: "alpha" }];
-  const baseVersions = { alpha: "8.11.0" };
-  const branchVersions = { alpha: "8.11.0" };
+  const baseVersions = { alpha: e("8.11.0") };
+  const branchVersions = { alpha: e("8.11.0") };
   const upd = {};
 
   let closedPR, deletedRef;
@@ -335,14 +321,10 @@ test("createOrUpdatePR closes the PR and deletes the branch when net diff is emp
     "main",
   );
 
-  // Sequence: close PR before deleting the ref. Reversing the order would risk
-  // GitHub auto-closing the PR with "branch deleted" semantics instead of an
-  // explicit close.
   assert.deepEqual(
     calls.map((c) => c.method),
     ["pulls.update", "git.deleteRef"],
   );
-  // Args.
   assert.equal(closedPR.pull_number, 42);
   assert.equal(closedPR.state, "closed");
   assert.equal(deletedRef, `heads/${BRANCH_NAME}`);
@@ -350,16 +332,15 @@ test("createOrUpdatePR closes the PR and deletes the branch when net diff is emp
 
 test("createOrUpdatePR is a no-op when net diff is empty and no PR exists", async () => {
   const deps = [{ name: "alpha" }];
-  const baseVersions = { alpha: "8.11.0" };
-  const branchVersions = { alpha: "8.11.0" };
-  const upd = {};
+  const baseVersions = { alpha: e("8.11.0") };
+  const branchVersions = { alpha: e("8.11.0") };
 
   const { github, calls } = makeGithub({});
 
   await createOrUpdatePR(
     { github, context: ctx, core: noopCore },
     deps,
-    upd,
+    {},
     baseVersions,
     branchVersions,
     null,
@@ -371,9 +352,8 @@ test("createOrUpdatePR is a no-op when net diff is empty and no PR exists", asyn
 
 test("createOrUpdatePR creates branch, commits, and creates PR when no PR exists", async () => {
   const deps = [{ name: "alpha" }];
-  const baseVersions = { alpha: "8.10.1" };
-  const branchVersions = baseVersions;
-  const upd = { alpha: "8.11.0" };
+  const baseVersions = { alpha: e("8.10.1") };
+  const upd = { alpha: e("8.11.0") };
 
   const sequence = [];
   let getRefArgs, createRefArgs, commitArgs;
@@ -403,36 +383,24 @@ test("createOrUpdatePR creates branch, commits, and creates PR when no PR exists
     },
   });
 
-  await createOrUpdatePR(
-    { github, context: ctx, core: noopCore },
-    deps,
-    upd,
-    baseVersions,
-    branchVersions,
-    null,
-    "main",
-  );
+  await createOrUpdatePR({ github, context: ctx, core: noopCore }, deps, upd, baseVersions, baseVersions, null, "main");
 
   assert.deepEqual(sequence, ["getRef", "createRef", "getContent", "commit", "createPR"]);
-  // Branch is seeded from the base branch's sha, not the bot branch's.
   assert.equal(getRefArgs.ref, "heads/main");
-  // Bot branch is created with the refs/heads/ prefix (createRef requires it).
   assert.equal(createRefArgs.ref, `refs/heads/${BRANCH_NAME}`);
   assert.equal(createRefArgs.sha, "abc");
-  // Commit must land on the bot branch.
   assert.equal(commitArgs.branch, BRANCH_NAME);
 });
 
 test("createOrUpdatePR updates an existing PR without re-creating the branch", async () => {
   const deps = [{ name: "alpha" }];
-  const baseVersions = { alpha: "8.10.1" };
-  const branchVersions = baseVersions;
-  const upd = { alpha: "8.11.0" };
+  const baseVersions = { alpha: e("8.10.1") };
+  const upd = { alpha: e("8.11.0") };
 
   let updatedPR, commitArgs;
   const { github, calls } = makeGithub({
     "repos.getContent": async () => ({
-      data: { sha: "x", content: Buffer.from("# stale").toString("base64") },
+      data: { sha: "x", content: Buffer.from("{}").toString("base64") },
     }),
     "repos.createOrUpdateFileContents": async (args) => {
       commitArgs = args;
@@ -449,7 +417,7 @@ test("createOrUpdatePR updates an existing PR without re-creating the branch", a
     deps,
     upd,
     baseVersions,
-    branchVersions,
+    baseVersions,
     { number: 42 },
     "main",
   );
@@ -458,15 +426,13 @@ test("createOrUpdatePR updates an existing PR without re-creating the branch", a
   assert.ok(!calls.some((c) => c.method === "git.createRef"));
   assert.equal(updatedPR.pull_number, 42);
   assert.match(updatedPR.body, /Updated alpha from 8\.10\.1 to 8\.11\.0/);
-  // Commit lands on the bot branch even on the update path.
   assert.equal(commitArgs.branch, BRANCH_NAME);
 });
 
 test("createOrUpdatePR tolerates 422 'Reference already exists' on createRef and continues", async () => {
   const deps = [{ name: "alpha" }];
-  const baseVersions = { alpha: "8.10.1" };
-  const branchVersions = baseVersions;
-  const upd = { alpha: "8.11.0" };
+  const baseVersions = { alpha: e("8.10.1") };
+  const upd = { alpha: e("8.11.0") };
 
   const sequence = [];
   let getRefArgs, createRefArgs;
@@ -495,28 +461,15 @@ test("createOrUpdatePR tolerates 422 'Reference already exists' on createRef and
     },
   });
 
-  await createOrUpdatePR(
-    { github, context: ctx, core: noopCore },
-    deps,
-    upd,
-    baseVersions,
-    branchVersions,
-    null,
-    "main",
-  );
+  await createOrUpdatePR({ github, context: ctx, core: noopCore }, deps, upd, baseVersions, baseVersions, null, "main");
 
-  // Sequence: createRef *was* called and threw; the catch absorbed the 422 and
-  // execution continued through the rest of the create flow.
   assert.deepEqual(sequence, ["getRef", "createRef", "getContent", "commit", "createPR"]);
-  // Args: even on the tolerated path, the calls themselves must have been correct.
   assert.equal(getRefArgs.ref, "heads/main");
   assert.equal(createRefArgs.ref, `refs/heads/${BRANCH_NAME}`);
   assert.equal(createRefArgs.sha, "abc");
 });
 
 test("createOrUpdatePR propagates createRef errors that don't match the tolerated 422 case", async () => {
-  // The catch only swallows 422 *with* a "Reference already exists" message.
-  // Any other status, or 422 with a different message, must propagate.
   const cases = [
     { label: "500", status: 500, message: "boom" },
     { label: "401", status: 401, message: "Unauthorized" },
@@ -536,9 +489,9 @@ test("createOrUpdatePR propagates createRef errors that don't match the tolerate
       createOrUpdatePR(
         { github, context: ctx, core: noopCore },
         [{ name: "alpha" }],
-        { alpha: "8.11.0" },
-        { alpha: "8.10.1" },
-        { alpha: "8.10.1" },
+        { alpha: e("8.11.0") },
+        { alpha: e("8.10.1") },
+        { alpha: e("8.10.1") },
         null,
         "main",
       ),

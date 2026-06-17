@@ -1,24 +1,36 @@
 const fs = require("node:fs").promises;
 
-const VERSION_FILE = ".github/dependency-versions";
+const VERSION_FILE = ".github/dependency-versions.json";
 
-function parseVersionFileContent(content) {
-  return Object.fromEntries(
-    content
-      .split("\n")
-      .filter((line) => line && !line.startsWith("#"))
-      .map((line) => {
-        const [key, value] = line.split("=");
-        return [key.replace(/_VERSION$/, "").toLowerCase(), value];
-      }),
-  );
+// Serialize in config order so the file stays stable/diff-friendly. Each dep's
+// entry is taken from updates if present, otherwise carried forward unchanged.
+function buildVersionFileContent(dependencies, updates, currentEntries) {
+  const map = {};
+  for (const dep of dependencies) {
+    const entry = updates[dep.name] ?? currentEntries[dep.name];
+    if (entry) map[dep.name] = entry;
+  }
+  return `${JSON.stringify(map, null, 2)}\n`;
 }
 
-function buildVersionFileContent(dependencies, updates, currentVersions) {
-  return [
-    "# Dependency versions. DO NOT EDIT MANUALLY.",
-    ...dependencies.map((dep) => `${dep.name.toUpperCase()}_VERSION=${updates[dep.name] || currentVersions[dep.name]}`),
-  ].join("\n");
+// True when a resolved entry differs materially from the prior one (so a re-hash
+// is required). sha256 is intentionally excluded: it is derived from url+content,
+// and we only re-download when version or url actually moves.
+function entryChanged(prev, next) {
+  return !prev || prev.version !== next.version || prev.url !== next.url;
+}
+
+// True when two fully-formed entries are identical (used to decide whether a write
+// or PR is needed). Considers the locked flag so a lock toggle is a real change.
+function entriesEqual(a, b) {
+  return (
+    !!a &&
+    !!b &&
+    a.version === b.version &&
+    a.url === b.url &&
+    a.sha256 === b.sha256 &&
+    Boolean(a.locked) === Boolean(b.locked)
+  );
 }
 
 async function getDependencyVersions({ github, context, core }, { ref = null, localPath = VERSION_FILE } = {}) {
@@ -37,7 +49,8 @@ async function getDependencyVersions({ github, context, core }, { ref = null, lo
             "base64",
           ).toString();
 
-    return parseVersionFileContent(content);
+    // The file is a flat JSON map of lowercase dep name -> { version, url, sha256, locked? }.
+    return JSON.parse(content);
   } catch (error) {
     if (error.code !== "ENOENT" && error.status !== 404) throw error;
     core.info(`No version file at ${ref || "checkout"}, treating as empty baseline`);
@@ -45,4 +58,10 @@ async function getDependencyVersions({ github, context, core }, { ref = null, lo
   }
 }
 
-module.exports = { getDependencyVersions, parseVersionFileContent, buildVersionFileContent, VERSION_FILE };
+module.exports = {
+  getDependencyVersions,
+  buildVersionFileContent,
+  entryChanged,
+  entriesEqual,
+  VERSION_FILE,
+};
