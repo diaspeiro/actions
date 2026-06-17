@@ -164,9 +164,30 @@ runs:
         provenance: mode=max
         sbom: true
 
+    # Attestation publishes provenance/SBOM to a public transparency log and needs
+    # id-token/attestations permissions that private repos typically lack, so only
+    # attest public repositories. Private/internal repos skip it (build+push still run).
     - name: generate attestation
+      if: ${{ github.event.repository.visibility == 'public' }}
       uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
       with:
         subject-name: ${{ inputs.registry }}/${{ inputs.image-name }}
         subject-digest: ${{ steps.push.outputs.digest }}
         push-to-registry: true
+
+    - name: note skipped attestation
+      if: ${{ github.event.repository.visibility != 'public' }}
+      shell: bash
+      env:
+        VISIBILITY: ${{ github.event.repository.visibility }}
+      run: |
+        # Notice annotation: surfaces at the top of the run Summary without opening logs.
+        echo "::notice title=Attestation skipped::Repository visibility is '${VISIBILITY}' (not public); provenance/SBOM attestation was skipped. The image was still built and pushed."
+        # Job summary: renders directly on the run's Summary tab, no log expansion needed.
+        {
+          echo "### Attestation skipped"
+          echo ""
+          echo "Repository visibility is \`${VISIBILITY}\` (not \`public\`), so provenance/SBOM attestation was **skipped**."
+          echo ""
+          echo "The image was still built and pushed normally."
+        } >> "$GITHUB_STEP_SUMMARY"

@@ -53,6 +53,8 @@ Caller requires permissions:
 - `artifact-metadata: write`
 - `packages: write` (only when pushing to GHCR)
 
+Attestation runs only when the repository is **public** (`github.event.repository.visibility == 'public'`). On private/internal repositories the attestation step is skipped: it emits a notice annotation and a "Attestation skipped" block on the run's Summary tab (both visible without expanding logs), the `id-token`/`attestations`/`artifact-metadata` permissions go unused, and the image is still built and pushed normally.
+
 | input | required? | default value | description |
 | --- | --- | --- | --- |
 | `registry` | no | `docker.io` | Registry hostname. |
