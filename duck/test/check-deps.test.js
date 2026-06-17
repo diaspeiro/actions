@@ -119,7 +119,7 @@ test("run aborts and refuses to commit when hashing fails", async () => {
 
     const failures = core.calls.filter((c) => c.level === "setFailed");
     assert.equal(failures.length, 1);
-    assert.match(failures[0].args[0], /Hashing failed for: acme\/alpha/);
+    assert.match(failures[0].args[0], /Hashing failed for: alpha \(acme\/alpha\)/);
     assert.ok(!calls.some((c) => c.method === "repos.createOrUpdateFileContents"), "must not commit");
     assert.ok(!calls.some((c) => c.method === "pulls.create"), "must not open a PR");
   } finally {
@@ -406,6 +406,78 @@ test("run records a newly-locked dep once with the locked flag", async () => {
 
     const written = JSON.parse(Buffer.from(committed.content, "base64").toString());
     assert.deepEqual(written.alpha, { version: "8.10.1", url, sha256: "lockedsha", locked: true });
+  } finally {
+    cfg.cleanup();
+    vf.cleanup();
+  }
+});
+
+// --- deps sharing one repo are identified by name, not repo ---
+
+test("run lists deps by name when several share a repo (rtorrent/libtorrent)", async () => {
+  // rtorrent and libtorrent both scan rakshasa/rtorrent; labeling log lines by repo
+  // would collapse them into two identical, ambiguous entries.
+  const cfg = withTempFile("config.json", {
+    dependencies: [
+      {
+        name: "rtorrent",
+        repo: "rakshasa/rtorrent",
+        pattern: "^v\\d+\\.\\d+(\\.\\d+)?$",
+        stripPattern: "^v",
+        assetPattern: "^rtorrent-\\d+\\.\\d+(\\.\\d+)?\\.tar\\.gz$",
+      },
+      {
+        name: "libtorrent",
+        repo: "rakshasa/rtorrent",
+        pattern: "^v\\d+\\.\\d+(\\.\\d+)?$",
+        stripPattern: "^v",
+        assetPattern: "^libtorrent-\\d+\\.\\d+(\\.\\d+)?\\.tar\\.gz$",
+      },
+    ],
+  });
+  // Already up to date, so no PR plumbing is exercised; the listing still prints.
+  const vf = vfile({
+    rtorrent: e("0.16.14", "rt", "https://dl/rt"),
+    libtorrent: e("0.16.14", "lt", "https://dl/lt"),
+  });
+  try {
+    const core = makeRecordingCore();
+    const { github } = makeGithub({
+      "pulls.list": async () => ({ data: [] }),
+      "git.deleteRef": async () => {
+        throw httpError(404, "Not Found");
+      },
+      "paginate.iterator": () =>
+        asyncPagesOf([
+          {
+            tag_name: "v0.16.14",
+            prerelease: false,
+            draft: false,
+            assets: [
+              { name: "rtorrent-0.16.14.tar.gz", browser_download_url: "https://dl/rt" },
+              { name: "libtorrent-0.16.14.tar.gz", browser_download_url: "https://dl/lt" },
+            ],
+          },
+        ]),
+    });
+
+    const hash = makeFetchSha({}); // unchanged -> must not be called
+    await run({ github, context: ctx(), core, configPath: cfg.path, versionFilePath: vf.path, hash });
+
+    assert.equal(core.calls.filter((c) => c.level === "setFailed").length, 0);
+    const infos = core.calls.filter((c) => c.level === "info").map((c) => c.args[0]);
+    assert.ok(
+      infos.some((m) => /^ {2}- rtorrent: 0\.16\.14$/.test(m)),
+      "lists rtorrent by name",
+    );
+    assert.ok(
+      infos.some((m) => /^ {2}- libtorrent: 0\.16\.14$/.test(m)),
+      "lists libtorrent by name",
+    );
+    assert.ok(
+      !infos.some((m) => /^ {2}- rakshasa\/rtorrent:/.test(m)),
+      "must not label a dependency by its (shared) repo",
+    );
   } finally {
     cfg.cleanup();
     vf.cleanup();
