@@ -30,10 +30,6 @@ inputs:
     description: 'Path to the Dockerfile.'
     required: false
     default: './Dockerfile'
-  cache-scope:
-    description: 'GHA cache scope. Each workflow should have a unique value.'
-    required: false
-    default: 'release-build'
   build-args:
     description: 'Multiline KEY=value build-args passed through to docker/build-push-action.'
     required: false
@@ -159,8 +155,6 @@ runs:
           ${{ inputs.build-args }}
           ${{ steps.base-image.outputs.build-arg }}
           ${{ steps.source-date-epoch.outputs.build-arg }}
-        cache-from: type=gha,scope=${{ inputs.cache-scope }}
-        cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
         provenance: mode=max
         sbom: true
 
